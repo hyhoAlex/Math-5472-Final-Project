@@ -1,0 +1,281 @@
+# Load necessary packages
+library(mvtnorm)  # For multivariate normal data generation
+library(Matrix)   # For matrix computations
+library(glmnet)   # For group lasso implementation
+library(dplyr)    # For data aggregation and summarization
+
+set.seed(123)  # For reproducibility
+
+# Simulation parameters
+n <- 200              # Number of samples
+p <- 20               # Number of variables
+k <- 4                # Subset size
+S_true <- 1:4         # True subset indices
+num_trials <- 10      # Number of simulation trials
+missing_prob <- 0.05  # Probability of missingness
+
+# Storage for performance metrics
+results <- data.frame(
+  Method = character(),
+  Correct_Subset_Selected = numeric(),
+  Correct_Variables_Selected = numeric(),
+  CSS_Objective = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Define the covariance matrix for X_S
+rho <- 0.25
+Sigma_XS <- (1 - rho) * diag(k) + rho * matrix(1, nrow = k, ncol = k)
+
+# Residual variance
+sigma2 <- 0.15
+
+# Generate the W matrix programmatically
+generate_W <- function(p, k) {
+  W <- matrix(0, nrow = p - k, ncol = k)
+  sqrt_17_over_90 <- sqrt(17 / 90)
+  sqrt_17_over_50 <- sqrt(17 / 50)
+  
+  for (i in 1:(p - k)) {
+    if (i <= 8) {
+      W[i, 1] <- ifelse(i %% 4 == 1, sqrt_17_over_90, ifelse(i %% 4 == 0, -sqrt_17_over_90, sqrt_17_over_50))
+      W[i, 2] <- ifelse(i %% 4 == 2, -sqrt_17_over_50, sqrt_17_over_50)
+      W[i, 3] <- ifelse(i %% 4 == 3, -sqrt_17_over_50, sqrt_17_over_50)
+    } else {
+      W[i, 2] <- ifelse(i %% 4 == 1, sqrt_17_over_90, ifelse(i %% 4 == 0, -sqrt_17_over_90, sqrt_17_over_50))
+      W[i, 3] <- ifelse(i %% 4 == 2, -sqrt_17_over_50, sqrt_17_over_50)
+      W[i, 4] <- ifelse(i %% 4 == 3, -sqrt_17_over_50, sqrt_17_over_50)
+    }
+  }
+  return(W)
+}
+
+W <- generate_W(p, k)
+
+# Function to generate data according to the PCSS model
+generate_data <- function() {
+  XS <- rmvnorm(n, mean = rep(0, k), sigma = Sigma_XS)
+  epsilon <- rmvnorm(n, mean = rep(0, p - k), sigma = sigma2 * diag(p - k))
+  X_minus_S <- XS %*% t(W) + epsilon
+  X <- cbind(XS, X_minus_S)
+  return(X)
+}
+
+# Estimate covariance matrix with missing data
+estimate_covariance <- function(X_missing) {
+  p <- ncol(X_missing)
+  cov_mat <- matrix(0, nrow = p, ncol = p)
+  
+  for (i in 1:p) {
+    for (j in i:p) {
+      idx <- which(!is.na(X_missing[, i]) & !is.na(X_missing[, j]))
+      if (length(idx) > 1) {
+        xi <- X_missing[idx, i]
+        xj <- X_missing[idx, j]
+        cov_ij <- cov(xi, xj)
+        cov_mat[i, j] <- cov_mat[j, i] <- cov_ij
+      }
+    }
+  }
+  
+  eig <- eigen(cov_mat, symmetric = TRUE)
+  eig$values <- pmax(eig$values, 0)
+  cov_psd <- eig$vectors %*% diag(eig$values) %*% t(eig$vectors)
+  return(cov_psd)
+}
+
+# CSS Objective function
+compute_css_objective <- function(Sigma, S) {
+  SS <- Sigma[S, S]
+  SS_inv <- solve(SS)
+  obj <- sum(diag(Sigma - Sigma[, S] %*% SS_inv %*% Sigma[S, ]))
+  return(max(obj, 0))
+}
+
+# Swapping algorithm for CSS
+css_swapping <- function(Sigma_hat, k, num_starts = 10) {
+  p <- ncol(Sigma_hat)
+  best_subset <- NULL
+  best_obj <- Inf
+  for (start in 1:num_starts) {
+    S <- sample(1:p, k)
+    current_obj <- compute_css_objective(Sigma_hat, S)
+    improved <- TRUE
+    while (improved) {
+      improved <- FALSE
+      for (i in 1:k) {
+        current_var <- S[i]
+        remaining_vars <- setdiff(1:p, S)
+        for (new_var in remaining_vars) {
+          S_new <- S
+          S_new[i] <- new_var
+          new_obj <- compute_css_objective(Sigma_hat, S_new)
+          if (new_obj < current_obj) {
+            S <- S_new
+            current_obj <- new_obj
+            improved <- TRUE
+            break
+          }
+        }
+        if (improved) break
+      }
+    }
+    if (current_obj < best_obj) {
+      best_subset <- S
+      best_obj <- current_obj
+    }
+  }
+  return(best_subset)
+}
+
+# Block Orthogonal Matching Pursuit (BOMP)
+bomp <- function(X_missing, k) {
+  p <- ncol(X_missing)
+  selected_vars <- integer(0)
+  residual <- X_missing
+  
+  for (i in 1:k) {
+    correlations <- numeric(p)
+    for (j in setdiff(1:p, selected_vars)) {
+      idx <- which(!is.na(residual[, j]))
+      if (length(idx) > 1) {
+        temp <- residual[idx, j]  # Use available values only (ignore missing data)
+        correlations[j] <- sum(temp^2, na.rm = TRUE)  # No weighting
+      } else {
+        correlations[j] <- 0
+      }
+    }
+    new_var <- which.max(correlations)
+    selected_vars <- c(selected_vars, new_var)
+    
+    X_selected <- X_missing[, selected_vars, drop = FALSE]
+    for (j in 1:ncol(X_missing)) {
+      idx <- which(!is.na(X_selected[, 1]) & !is.na(X_missing[, j]))
+      if (length(idx) > 1) {
+        Y <- X_missing[idx, j]
+        X <- X_selected[idx, , drop = FALSE]
+        model <- lm(Y ~ X - 1)
+        pred <- X %*% coef(model)
+        residual[idx, j] <- X_missing[idx, j] - pred
+      }
+    }
+  }
+  
+  return(selected_vars)
+}
+
+# Group Lasso Binary Search
+group_lasso_binary_search <- function(X_missing, k, tol = 1e-10) {
+  X_imputed <- X_missing
+  for (j in 1:ncol(X_imputed)) {
+    idx <- which(is.na(X_imputed[, j]))
+    if (length(idx) > 0) {
+      X_imputed[idx, j] <- mean(X_imputed[, j], na.rm = TRUE)
+    }
+  }
+  
+  groups <- 1:ncol(X_imputed)
+  y <- X_imputed[, 1]
+  X <- X_imputed[, -1]
+  lambda_low <- 0
+  lambda_high <- max(rowSums(abs(2 * crossprod(X))))
+  selected_vars <- NULL
+  
+  while (lambda_high - lambda_low > tol) {
+    lambda_mid <- (lambda_high + lambda_low) / 2
+    fit <- glmnet(X, y, alpha = 1, lambda = lambda_mid)
+    non_zero_coefs <- which(coef(fit)[-1] != 0)
+    num_selected <- length(non_zero_coefs)
+    
+    if (num_selected == k) {
+      selected_vars <- non_zero_coefs
+      break
+    } else if (num_selected < k) {
+      lambda_high <- lambda_mid
+    } else {
+      lambda_low <- lambda_mid
+    }
+  }
+  
+  return(selected_vars)
+}
+
+# Main simulation loop
+for (trial in 1:num_trials) {
+  tryCatch({
+    X_complete <- generate_data()
+    missing_mask <- matrix(runif(n * p) < missing_prob, nrow = n, ncol = p)
+    X_missing <- X_complete
+    X_missing[missing_mask] <- NA
+    
+    Sigma_hat <- estimate_covariance(X_missing)
+    
+    # Covariance CSS (Swapping)
+    selected_subset <- css_swapping(Sigma_hat, k)
+    css_obj <- compute_css_objective(cov(X_complete), selected_subset)
+    results <- rbind(results, data.frame(
+      Method = "Covariance CSS",
+      Correct_Subset_Selected = as.numeric(all(sort(selected_subset) == S_true)),
+      Correct_Variables_Selected = length(intersect(selected_subset, S_true)),
+      CSS_Objective = css_obj
+    ))
+    
+    # Block OMP
+    selected_bomp <- bomp(X_missing, k)
+    css_obj_bomp <- compute_css_objective(cov(X_complete), selected_bomp)
+    results <- rbind(results, data.frame(
+      Method = "BOMP",
+      Correct_Subset_Selected = as.numeric(all(sort(selected_bomp) == S_true)),
+      Correct_Variables_Selected = length(intersect(selected_bomp, S_true)),
+      CSS_Objective = css_obj_bomp
+    ))
+    
+    # Group Lasso
+    selected_glasso <- group_lasso_binary_search(X_missing, k)
+    css_obj_glasso <- compute_css_objective(cov(X_complete), selected_glasso)
+    results <- rbind(results, data.frame(
+      Method = "Group Lasso",
+      Correct_Subset_Selected = as.numeric(all(sort(selected_glasso) == S_true)),
+      Correct_Variables_Selected = length(intersect(selected_glasso, S_true)),
+      CSS_Objective = css_obj_glasso
+    ))
+    
+    # Random Selection
+    selected_random <- sample(1:p, k)
+    css_obj_random <- compute_css_objective(cov(X_complete), selected_random)
+    results <- rbind(results, data.frame(
+      Method = "Random",
+      Correct_Subset_Selected = as.numeric(all(sort(selected_random) == S_true)),
+      Correct_Variables_Selected = length(intersect(selected_random, S_true)),
+      CSS_Objective = css_obj_random
+    ))
+    
+  }, error = function(e) {
+    warning(paste("Trial", trial, "failed:", e$message))
+  })
+}
+
+# Aggregate results
+aggregated_results <- results %>%
+  group_by(Method) %>%
+  summarise(
+    Correct_Subset_Selected = mean(Correct_Subset_Selected, na.rm = TRUE),
+    Correct_Variables_Selected_Mean = mean(Correct_Variables_Selected, na.rm = TRUE),
+    Correct_Variables_Selected_SD = sd(Correct_Variables_Selected, na.rm = TRUE),
+    CSS_Objective_Mean = mean(CSS_Objective, na.rm = TRUE),
+    CSS_Objective_SD = sd(CSS_Objective, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(Correct_Subset_Selected))
+
+# Format results
+formatted_results <- aggregated_results %>%
+  mutate(
+    Correct_Subset_Selected = sprintf("%.3f", Correct_Subset_Selected),
+    Correct_Variables_Selected = sprintf("%.3f ± %.3f", Correct_Variables_Selected_Mean, Correct_Variables_Selected_SD),
+    CSS_Objective = sprintf("%.3f ± %.3f", CSS_Objective_Mean, CSS_Objective_SD)
+  ) %>%
+  dplyr::select(Method, Correct_Subset_Selected, Correct_Variables_Selected, CSS_Objective)
+
+# Display results
+print(formatted_results)
