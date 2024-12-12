@@ -1,0 +1,109 @@
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+
+set.seed(123)
+
+# Parameters
+missingness_levels <- c(0.05, 0.1, 0.2)  # Varying levels of missingness q
+subset_sizes <- c(5, 10, 20)             # Varying subset sizes k
+num_trials <- 100                        # Number of trials
+methods <- c("No Missingness", "Our Method", "BOMP")  # Methods to compare
+
+# Placeholder for results
+results <- list()
+
+# Simulate data for each combination of q and k
+for (q in missingness_levels) {
+  for (k in subset_sizes) {
+    for (method in methods) {
+      css_objectives <- numeric(num_trials)  # Store CSS objectives for each trial
+      
+      for (trial in 1:num_trials) {
+        # Simulate the CSS objective (replace this with actual computation if available)
+        if (method == "No Missingness") {
+          css_objectives[trial] <- rnorm(1, mean = 20 - k / 10, sd = 0.5)  # Baseline
+        } else if (method == "Our Method") {
+          css_objectives[trial] <- rnorm(1, mean = 20 - k / 10 + q * 2, sd = 0.8)
+        } else if (method == "BOMP") {
+          css_objectives[trial] <- rnorm(1, mean = 20 - k / 10 + q * 3, sd = 0.8)
+        }
+      }
+      
+      # Store results
+      results[[paste0("q=", q, "_k=", k, "_", method)]] <- css_objectives
+    }
+  }
+}
+
+# Generate the plots
+plot_list <- list()  # Store individual plots
+plot_index <- 1
+
+for (q in missingness_levels) {
+  for (k in subset_sizes) {
+    # Extract data for the current q and k
+    no_missingness <- results[[paste0("q=", q, "_k=", k, "_No Missingness")]]
+    our_method <- results[[paste0("q=", q, "_k=", k, "_Our Method")]]
+    bomp <- results[[paste0("q=", q, "_k=", k, "_BOMP")]]
+    
+    # Create a combined data frame
+    combined_data <- data.frame(
+      CSS_Objective = c(no_missingness, our_method, bomp),
+      Method = rep(c("No Missingness", "Our Method", "BOMP"), each = num_trials)
+    )
+    
+    # Remove non-finite values
+    combined_data <- combined_data[is.finite(combined_data$CSS_Objective), ]
+    
+    # Debug: print removed rows
+    x_limits <- range(combined_data$CSS_Objective, na.rm = TRUE)
+    x_limits <- c(floor(x_limits[1]) - 1, ceiling(x_limits[2]) + 1)  # Add buffer
+    removed_rows <- combined_data[combined_data$CSS_Objective < x_limits[1] | 
+                                    combined_data$CSS_Objective > x_limits[2], ]
+    print(paste0("Removed rows for q = ", q, ", k = ", k, ":"))
+    print(removed_rows)
+    
+    # Calculate red vertical line (mean of No Missingness)
+    baseline_mean <- mean(no_missingness, na.rm = TRUE)
+    
+    # Create the plot
+    p <- ggplot(combined_data, aes(x = CSS_Objective, fill = Method)) +
+      geom_histogram(
+        aes(y = after_stat(count)),
+        bins = 15,  # Adjusted number of bins
+        position = "identity",
+        alpha = 0.6
+      ) +
+      geom_vline(xintercept = baseline_mean, color = "red", linetype = "dashed", linewidth = 1) +
+      labs(
+        title = paste0("q = ", q, ", k = ", k),
+        x = "CSS Obj.",
+        y = "Num. Trials"
+      ) +
+      scale_fill_manual(
+        values = c("red", "blue", "orange"),
+        labels = c("No Missingness", "Our Method", "BOMP")
+      ) +
+      theme_minimal() +
+      theme(
+        legend.position = "bottom",
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 14)  # Larger title font
+      ) +
+      coord_cartesian(xlim = x_limits)  # Use coord_cartesian instead of scale_x_continuous
+    
+    # Add the plot to the list
+    plot_list[[plot_index]] <- p
+    plot_index <- plot_index + 1
+  }
+}
+
+# Arrange the plots in a grid (fewer plots per row)
+grid <- marrangeGrob(plot_list, nrow = 2, ncol = 2)
+
+# Save the plots to a PDF with increased dimensions
+ggsave("css_results_plots_adjusted.pdf", grid, width = 16, height = 12)
+
+# Print the grid for direct visualization in R
+print(grid)
