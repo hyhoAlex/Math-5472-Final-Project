@@ -1,98 +1,97 @@
-# Load necessary libraries
-library(boot)
-library(ggplot2)
+# Load required libraries
+library(psych)   # For Cronbach's alpha
+library(ggplot2) # For plotting
+library(boot)    # For bootstrap confidence intervals
 
-# Load the reduced survey dataset
-file_path <- "C:/Users/doubl/Desktop/reduced_survey.csv"
-reduced_survey <- read.csv(file_path, na.strings = c("NA", ""))
+# Step 1: Ensure data is numeric
+bfi_numeric <- as.data.frame(lapply(bfi_numeric, function(x) as.numeric(as.character(x))))
 
-# Step 1: Remove "age" and "education" columns if they exist
-reduced_survey <- reduced_survey[, !(names(reduced_survey) %in% c("age", "education"))]
+# Step 2: Identify items with "R" in their names
+items_to_reverse <- grep("R$", colnames(bfi_numeric), value = TRUE)  # Select items ending with "R"
 
-# View the reduced survey dataset to confirm the removal
-head(reduced_survey)
+# Step 3: Reverse-code these items in the dataset
+max_scale <- 5  # Adjust based on the Likert scale
+bfi_numeric_reversed <- bfi_numeric  # Copy the dataset
+for (item in items_to_reverse) {
+  # Reverse-code the item
+  bfi_numeric_reversed[[item]] <- max_scale + 1 - bfi_numeric[[item]]
+}
 
-# Step 2: Extract column indices for personality traits based on the first letter of column names
-selected_subsets <- list(
-  Extraversion = grep("^E", names(reduced_survey)),
-  Agreeableness = grep("^A", names(reduced_survey)),
-  Conscientiousness = grep("^C", names(reduced_survey)),
-  Neuroticism = grep("^N", names(reduced_survey)),
-  Openness = grep("^O", names(reduced_survey))
+# Step 2: Define personality factors (adjust to match your dataset)
+new_categories <- list(
+  Extraversion = c("talkative", "fullenergy", "enthusiastic", "quietR", "shyR", "outgoing"),
+  Agreeableness = c("findfaultR", "helpful", "quarrelsR", "forgiving", "trusting", "coldR"),
+  Conscientiousness = c("carelessR", "reliable", "disorganizedR", "lazyR", "efficient", "plans"),
+  Neuroticism = c("tense", "worries", "emostableR", "moody", "nervous"),
+  Openness = c("curious", "imagination", "artistic", "routineR", "nonartisticR", "sophisticated")
 )
 
-# Step 3: Define Cronbach's alpha function
-compute_cronbach_alpha <- function(data_subset) {
-  data_subset <- data_subset[rowSums(!is.na(data_subset)) > 0, ]  # Remove rows with all missing values
-  p <- ncol(data_subset)
-  if (p < 2 || nrow(data_subset) == 0) return(NA)  # Alpha is undefined for invalid subsets
-  item_var <- apply(data_subset, 2, var, na.rm = TRUE)
-  if (all(item_var == 0, na.rm = TRUE)) return(NA)  # Skip subsets with zero variance
-  total_var <- var(rowSums(data_subset, na.rm = TRUE), na.rm = TRUE)
-  if (is.na(total_var) || total_var == 0) return(NA)  # Skip subsets with zero total variance
-  alpha <- p / (p - 1) * (1 - sum(item_var, na.rm = TRUE) / total_var)
-  if (is.nan(alpha) || alpha < 0) alpha <- 0
-  if (alpha > 1) alpha <- 1
-  return(alpha)
+# Step 3: Define a function to calculate Cronbach's alpha
+calc_alpha <- function(data, indices) {
+  sampled_data <- data[indices, ]
+  return(alpha(sampled_data)$total$raw_alpha)
 }
 
-# Step 4: Bootstrap reliability for each trait
-bootstrap_alpha <- function(data, indices, subset_indices) {
-  data_resampled <- data[indices, , drop = FALSE]
-  data_subset <- data_resampled[, subset_indices, drop = FALSE]
-  return(compute_cronbach_alpha(data_subset))
+# Step 4: Perform bootstrap to calculate alpha and 95% confidence intervals
+bootstrap_alpha <- function(data, B = 1000) {
+  results <- boot(data, statistic = calc_alpha, R = B)  # Perform bootstrap
+  alpha_est <- mean(results$t)  # Mean alpha value
+  alpha_ci <- boot.ci(results, type = "perc")$percent[4:5]  # 95% CI
+  return(c(alpha_est, alpha_ci))  # Return alpha and confidence intervals
 }
 
-# Step 5: Initialize lists for results and valid traits
-bootstrap_results <- list()
-valid_traits <- c()  # To track traits with valid results
+# Step 5: Calculate Cronbach's alpha and confidence intervals for each personality factor
+factor_results <- data.frame(Factor = character(), Alpha = numeric(), LowerCI = numeric(), UpperCI = numeric())
 
-# Step 6: Loop through each subset
-for (i in seq_along(selected_subsets)) {
-  subset_indices <- selected_subsets[[i]]
+for (factor in names(new_categories)) {
+  # Subset data for the current factor
+  factor_data <- bfi_numeric_reversed[, new_categories[[factor]], drop = FALSE]
   
-  # Check if the subset has sufficient data
-  subset_data <- reduced_survey[, subset_indices, drop = FALSE]
-  if (ncol(subset_data) < 2 || all(is.na(subset_data))) {
-    cat("Skipping trait:", names(selected_subsets)[i], "- insufficient data\n")
-    next
-  }
+  # Run bootstrap to calculate alpha and confidence intervals
+  result <- bootstrap_alpha(factor_data)
   
-  # Perform bootstrapping
-  boot_result <- boot(data = reduced_survey, statistic = bootstrap_alpha, R = 1000, subset_indices = subset_indices)
-  ci_result <- tryCatch(
-    boot.ci(boot_result, type = "bca"),
-    error = function(e) NULL  # Return NULL on error
-  )
-  
-  # Check if the result is valid
-  if (!is.null(ci_result) && is.list(ci_result) && !is.null(ci_result$t0)) {
-    valid_traits <- c(valid_traits, names(selected_subsets)[i])  # Append valid trait name
-    bootstrap_results[[length(valid_traits)]] <- ci_result  # Store only valid results
-  }
+  # Add the results to our dataframe
+  factor_results <- rbind(factor_results, 
+                          data.frame(Factor = factor, Alpha = result[1], LowerCI = result[2], UpperCI = result[3]))
 }
 
-# Filter bootstrap_results to ensure all are lists
-bootstrap_results <- bootstrap_results[!sapply(bootstrap_results, is.null)]
-
-# Step 7: Create the results data frame
-results <- data.frame(
-  Trait = valid_traits,
-  Alpha = sapply(bootstrap_results, function(res) res$t0),  # Extract Cronbach's alpha
-  Lower = sapply(bootstrap_results, function(res) if (!is.null(res$bca)) res$bca[4] else NA),  # Extract lower bound of CI
-  Upper = sapply(bootstrap_results, function(res) if (!is.null(res$bca)) res$bca[5] else NA)   # Extract upper bound of CI
+# Step 6: Add comparison datasets (Norwegian, Brazilian, and Serbian surveys)
+comparison_data <- data.frame(
+  Factor = rep(c("Extraversion", "Agreeableness", "Conscientiousness", "Neuroticism", "Openness"), 3),
+  Survey = rep(c("Norwegian", "Brazilian", "Serbian"), each = 5),
+  Alpha = c(0.79, 0.72, 0.81, 0.77, 0.75,  # Norwegian
+            0.76, 0.70, 0.78, 0.72, 0.73,  # Brazilian
+            0.78, 0.74, 0.80, 0.73, 0.74), # Serbian
+  LowerCI = c(0.75, 0.69, 0.78, 0.73, 0.71, # Norwegian
+              0.72, 0.67, 0.75, 0.69, 0.70, # Brazilian
+              0.74, 0.71, 0.77, 0.70, 0.71), # Serbian
+  UpperCI = c(0.83, 0.76, 0.85, 0.81, 0.79, # Norwegian
+              0.80, 0.73, 0.81, 0.75, 0.76, # Brazilian
+              0.82, 0.77, 0.83, 0.76, 0.77)  # Serbian
 )
 
-# Step 8: Print summarized results
-print(results)
+# Add your survey results to the comparison data
+our_results <- data.frame(
+  Factor = factor_results$Factor,
+  Survey = rep("Ours", nrow(factor_results)),
+  Alpha = factor_results$Alpha,
+  LowerCI = factor_results$LowerCI,
+  UpperCI = factor_results$UpperCI
+)
 
-# Step 9: Visualize reliability results
-ggplot(results, aes(x = Trait, y = Alpha)) +
-  geom_point(color = "blue", size = 3) +
-  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.2, color = "blue") +
+final_data <- rbind(comparison_data, our_results)
+
+# Step 7: Create the plot
+ggplot(final_data, aes(x = Factor, y = Alpha, color = Survey)) +
+  geom_point(position = position_dodge(width = 0.4), size = 3) +
+  geom_errorbar(aes(ymin = LowerCI, ymax = UpperCI), position = position_dodge(width = 0.4), width = 0.2) +
   labs(
-    title = "Reliability Analysis of Reduced Survey",
-    y = "Cronbach's Alpha",
-    x = "Personality Traits"
+    title = "Reliability of Shortened BFI Surveys",
+    y = "Coefficient α",
+    x = ""
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank()
+  )
