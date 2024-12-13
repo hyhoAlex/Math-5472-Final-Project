@@ -1,12 +1,3 @@
-# Extract the reduced survey questions using the selected indices
-reduced_survey <- bfi_numeric[, selected_items]
-
-# View the reduced survey dataset
-head(reduced_survey)
-
-# Optional: Save the reduced survey to a CSV file
-write.csv(reduced_survey, "reduced_survey.csv", row.names = FALSE)
-
 # Load necessary libraries
 library(boot)
 library(ggplot2)
@@ -15,7 +6,13 @@ library(ggplot2)
 file_path <- "C:/Users/doubl/Desktop/reduced_survey.csv"
 reduced_survey <- read.csv(file_path, na.strings = c("NA", ""))
 
-# Extract column indices based on the first letter of column names
+# Step 1: Remove "age" and "education" columns if they exist
+reduced_survey <- reduced_survey[, !(names(reduced_survey) %in% c("age", "education"))]
+
+# View the reduced survey dataset to confirm the removal
+head(reduced_survey)
+
+# Step 2: Extract column indices for personality traits based on the first letter of column names
 selected_subsets <- list(
   Extraversion = grep("^E", names(reduced_survey)),
   Agreeableness = grep("^A", names(reduced_survey)),
@@ -24,7 +21,7 @@ selected_subsets <- list(
   Openness = grep("^O", names(reduced_survey))
 )
 
-# Define Cronbach's alpha function
+# Step 3: Define Cronbach's alpha function
 compute_cronbach_alpha <- function(data_subset) {
   data_subset <- data_subset[rowSums(!is.na(data_subset)) > 0, ]  # Remove rows with all missing values
   p <- ncol(data_subset)
@@ -39,18 +36,18 @@ compute_cronbach_alpha <- function(data_subset) {
   return(alpha)
 }
 
-# Bootstrap reliability for each trait
+# Step 4: Bootstrap reliability for each trait
 bootstrap_alpha <- function(data, indices, subset_indices) {
   data_resampled <- data[indices, , drop = FALSE]
   data_subset <- data_resampled[, subset_indices, drop = FALSE]
   return(compute_cronbach_alpha(data_subset))
 }
 
-# Initialize lists for results and valid traits
+# Step 5: Initialize lists for results and valid traits
 bootstrap_results <- list()
 valid_traits <- c()  # To track traits with valid results
 
-# Loop through each subset
+# Step 6: Loop through each subset
 for (i in seq_along(selected_subsets)) {
   subset_indices <- selected_subsets[[i]]
   
@@ -78,7 +75,7 @@ for (i in seq_along(selected_subsets)) {
 # Filter bootstrap_results to ensure all are lists
 bootstrap_results <- bootstrap_results[!sapply(bootstrap_results, is.null)]
 
-# Create the results data frame
+# Step 7: Create the results data frame
 results <- data.frame(
   Trait = valid_traits,
   Alpha = sapply(bootstrap_results, function(res) res$t0),  # Extract Cronbach's alpha
@@ -86,10 +83,10 @@ results <- data.frame(
   Upper = sapply(bootstrap_results, function(res) if (!is.null(res$bca)) res$bca[5] else NA)   # Extract upper bound of CI
 )
 
-# Print summarized results
+# Step 8: Print summarized results
 print(results)
 
-# Visualize reliability results
+# Step 9: Visualize reliability results
 ggplot(results, aes(x = Trait, y = Alpha)) +
   geom_point(color = "blue", size = 3) +
   geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.2, color = "blue") +
