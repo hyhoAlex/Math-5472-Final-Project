@@ -1,13 +1,13 @@
 # Load necessary libraries
-library(psych)   # For the BFI dataset
+library(psych)   # For handling personality data
+library(knitr)   # For creating formatted tables
 
-# Load the Big Five Inventory dataset from the psych package
-data(bfi)
+# Step 1: Load and preprocess the dataset
+file_path <- "C:/Users/doubl/Downloads/BFI228.csv"
+bfi_data <- read.csv(file_path, na.strings = c("NA", ""))  # Load dataset
+bfi_numeric <- bfi_data[, sapply(bfi_data, is.numeric)][,-1]    # Retain only numeric columns
 
-# Step 1: Preprocess the dataset - retain only numeric columns and handle missing data
-bfi_numeric <- bfi[, sapply(bfi, is.numeric)]  # Keep only numeric columns
-
-# Step 2: Estimate the covariance matrix using the provided function
+# Step 2: Define the function to estimate the covariance matrix
 estimate_covariance <- function(X_missing) {
   p <- ncol(X_missing)
   cov_mat <- matrix(0, nrow = p, ncol = p)
@@ -25,7 +25,7 @@ estimate_covariance <- function(X_missing) {
   }
   
   eig <- eigen(cov_mat, symmetric = TRUE)
-  eig$values <- pmax(eig$values, 0)
+  eig$values <- pmax(eig$values, 0)  # Ensure non-negative eigenvalues
   cov_psd <- eig$vectors %*% diag(eig$values) %*% t(eig$vectors)
   return(cov_psd)
 }
@@ -44,7 +44,7 @@ css_swapping <- function(Sigma_hat, k, num_starts = 10) {
   best_subset <- NULL
   best_obj <- Inf
   for (start in 1:num_starts) {
-    S <- sample(1:p, k)
+    S <- sample(1:p, k)  # Randomly select `k` indices
     current_obj <- compute_css_objective(Sigma_hat, S)
     improved <- TRUE
     while (improved) {
@@ -75,7 +75,7 @@ css_swapping <- function(Sigma_hat, k, num_starts = 10) {
 }
 
 # Step 5: Apply the CSS procedure
-# Estimate the covariance matrix from the BFI dataset (handling missing data)
+# Estimate the covariance matrix from the BFI dataset
 Sigma_hat <- estimate_covariance(bfi_numeric)
 
 # Define the target number of questions for the reduced survey
@@ -112,6 +112,5 @@ table_data <- data.frame(
 print(table_data)
 
 # Optional: Create a nicely formatted table using knitr (for markdown or LaTeX output)
-library(knitr)
 kable(table_data, col.names = c("Factor", "# in Reduced Survey", "# in Original Survey"),
-      caption = "The number of questions attributed to each of the five personality factors for both the original and reduced surveys.")
+      caption = "The number of questions attributed to each of the five personality factors for both the original and reduced surveys.")   
