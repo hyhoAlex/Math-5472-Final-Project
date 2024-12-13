@@ -1,109 +1,211 @@
-# Load necessary libraries
+# Load required libraries
 library(ggplot2)
-library(gridExtra)
+library(MASS)
 
-set.seed(123)
+# Load and preprocess the data
+file_path <- "C:/Users/doubl/Downloads/eighthr.data"
+data <- read.csv(file_path, header = FALSE)
 
-# Parameters
-missingness_levels <- c(0.05, 0.1, 0.2)  # Varying levels of missingness q
-subset_sizes <- c(5, 10, 20)             # Varying subset sizes k
-num_trials <- 100                        # Number of trials
-methods <- c("No Missingness", "Our Method", "BOMP")  # Methods to compare
+# Step 1: Preprocess the data
+# Exclude the first column (assumed to be dates or non-numeric data)
+X <- data[, -1, drop = FALSE]  # Remove the first column and ensure matrix structure
+X <- apply(X, 2, as.numeric)   # Convert all columns to numeric
+X <- as.matrix(X)              # Ensure X is treated as a matrix
 
-# Placeholder for results
-results <- list()
+# Verify that X is numeric
+if (!is.numeric(X)) {
+  stop("X contains non-numeric data. Please check the dataset.")
+}
 
-# Simulate data for each combination of q and k
-for (q in missingness_levels) {
-  for (k in subset_sizes) {
-    for (method in methods) {
-      css_objectives <- numeric(num_trials)  # Store CSS objectives for each trial
-      
-      for (trial in 1:num_trials) {
-        # Simulate the CSS objective (replace this with actual computation if available)
-        if (method == "No Missingness") {
-          css_objectives[trial] <- rnorm(1, mean = 20 - k / 10, sd = 0.5)  # Baseline
-        } else if (method == "Our Method") {
-          css_objectives[trial] <- rnorm(1, mean = 20 - k / 10 + q * 2, sd = 0.8)
-        } else if (method == "BOMP") {
-          css_objectives[trial] <- rnorm(1, mean = 20 - k / 10 + q * 3, sd = 0.8)
+# Remove columns with all zeros or missing values
+non_zero_cols <- which(colSums(!is.na(X) & X != 0) > 0)
+X <- X[, non_zero_cols, drop = FALSE]
+
+# Remove rows with any missing values for initial covariance computation
+complete_rows <- complete.cases(X)
+X_complete <- X[complete_rows, , drop = FALSE]
+
+# Center the complete data
+X_centered <- scale(X_complete, center = TRUE, scale = FALSE)
+Sigma_hat <- (t(X_centered) %*% X_centered) / nrow(X_centered)
+
+# Step 2: Define the functions for CSS and BOMP
+# CSS Objective Function
+compute_css_objective <- function(Sigma, S) {
+  p <- nrow(Sigma)
+  if (length(S) == 0) return(sum(diag(Sigma)))
+  
+  SS <- Sigma[S, S, drop = FALSE]
+  # Use generalized inverse for numerical stability
+  tryCatch({
+    SS_inv <- MASS::ginv(SS)
+    # Compute reconstruction error
+    reconstruction <- Sigma[, S, drop = FALSE] %*% SS_inv %*% t(Sigma[, S, drop = FALSE])
+    obj <- sum(diag(Sigma)) - sum(diag(reconstruction))
+    return(max(0, obj))  # Ensure non-negative objective
+  }, error = function(e) {
+    return(sum(diag(Sigma)))  # Return total variance if computation fails
+  })
+}
+
+# Swapping algorithm for CSS
+css_swapping <- function(Sigma_hat, k, num_starts = 10) {
+  p <- ncol(Sigma_hat)
+  best_subset <- NULL
+  best_obj <- Inf
+  
+  for (start in 1:num_starts) {
+    # Initialize with random subset
+    S <- sort(sample(1:p, k))
+    current_obj <- compute_css_objective(Sigma_hat, S)
+    
+    improved <- TRUE
+    while (improved) {
+      improved <- FALSE
+      for (i in 1:k) {
+        current_var <- S[i]
+        remaining_vars <- setdiff(1:p, S)
+        
+        for (new_var in remaining_vars) {
+          S_new <- S
+          S_new[i] <- new_var
+          S_new <- sort(S_new)  # Keep sorted for consistency
+          
+          new_obj <- compute_css_objective(Sigma_hat, S_new)
+          if (new_obj < current_obj) {
+            S <- S_new
+            current_obj <- new_obj
+            improved <- TRUE
+            break
+          }
         }
+        if (improved) break
       }
-      
-      # Store results
-      results[[paste0("q=", q, "_k=", k, "_", method)]] <- css_objectives
+    }
+    
+    if (current_obj < best_obj) {
+      best_subset <- S
+      best_obj <- current_obj
     }
   }
+  
+  return(list(subset = best_subset, objective = best_obj))
 }
 
-# Generate the plots
-plot_list <- list()  # Store individual plots
-plot_index <- 1
-
-for (q in missingness_levels) {
-  for (k in subset_sizes) {
-    # Extract data for the current q and k
-    no_missingness <- results[[paste0("q=", q, "_k=", k, "_No Missingness")]]
-    our_method <- results[[paste0("q=", q, "_k=", k, "_Our Method")]]
-    bomp <- results[[paste0("q=", q, "_k=", k, "_BOMP")]]
+# Block Orthogonal Matching Pursuit (BOMP)
+bomp <- function(X_missing, k) {
+  p <- ncol(X_missing)
+  n <- nrow(X_missing)
+  selected_vars <- integer(0)
+  residual <- X_missing
+  
+  for (i in 1:k) {
+    correlations <- numeric(p)
+    for (j in setdiff(1:p, selected_vars)) {
+      idx <- which(!is.na(residual[, j]))
+      if (length(idx) > 1) {
+        temp <- residual[idx, j]
+        correlations[j] <- sum(temp^2, na.rm = TRUE)
+      } else {
+        correlations[j] <- 0
+      }
+    }
+    new_var <- which.max(correlations)
+    selected_vars <- c(selected_vars, new_var)
     
-    # Create a combined data frame
-    combined_data <- data.frame(
-      CSS_Objective = c(no_missingness, our_method, bomp),
-      Method = rep(c("No Missingness", "Our Method", "BOMP"), each = num_trials)
-    )
-    
-    # Remove non-finite values
-    combined_data <- combined_data[is.finite(combined_data$CSS_Objective), ]
-    
-    # Debug: print removed rows
-    x_limits <- range(combined_data$CSS_Objective, na.rm = TRUE)
-    x_limits <- c(floor(x_limits[1]) - 1, ceiling(x_limits[2]) + 1)  # Add buffer
-    removed_rows <- combined_data[combined_data$CSS_Objective < x_limits[1] | 
-                                    combined_data$CSS_Objective > x_limits[2], ]
-    print(paste0("Removed rows for q = ", q, ", k = ", k, ":"))
-    print(removed_rows)
-    
-    # Calculate red vertical line (mean of No Missingness)
-    baseline_mean <- mean(no_missingness, na.rm = TRUE)
-    
-    # Create the plot
-    p <- ggplot(combined_data, aes(x = CSS_Objective, fill = Method)) +
-      geom_histogram(
-        aes(y = after_stat(count)),
-        bins = 15,  # Adjusted number of bins
-        position = "identity",
-        alpha = 0.6
-      ) +
-      geom_vline(xintercept = baseline_mean, color = "red", linetype = "dashed", linewidth = 1) +
-      labs(
-        title = paste0("q = ", q, ", k = ", k),
-        x = "CSS Obj.",
-        y = "Num. Trials"
-      ) +
-      scale_fill_manual(
-        values = c("red", "blue", "orange"),
-        labels = c("No Missingness", "Our Method", "BOMP")
-      ) +
-      theme_minimal() +
-      theme(
-        legend.position = "bottom",
-        legend.title = element_blank(),
-        plot.title = element_text(hjust = 0.5, size = 14)  # Larger title font
-      ) +
-      coord_cartesian(xlim = x_limits)  # Use coord_cartesian instead of scale_x_continuous
-    
-    # Add the plot to the list
-    plot_list[[plot_index]] <- p
-    plot_index <- plot_index + 1
+    # Update residual
+    X_selected <- X_missing[, selected_vars, drop = FALSE]
+    for (j in 1:p) {
+      idx <- which(!is.na(X_selected[, 1]) & !is.na(X_missing[, j]))
+      if (length(idx) > ncol(X_selected)) {  # Need more samples than variables for regression
+        Y <- X_missing[idx, j]
+        X <- X_selected[idx, , drop = FALSE]
+        tryCatch({
+          model <- lm(Y ~ X - 1)
+          pred <- X %*% coef(model)
+          residual[idx, j] <- Y - pred
+        }, error = function(e) {
+          # If regression fails, keep original residuals
+        })
+      }
+    }
   }
+  
+  return(selected_vars)
 }
 
-# Arrange the plots in a grid (fewer plots per row)
-grid <- marrangeGrob(plot_list, nrow = 2, ncol = 2)
+# Step 3: Simulate missingness
+introduce_missingness <- function(X, q) {
+  X_missing <- X
+  n_elements <- length(X_missing[!is.na(X_missing)])  # Count non-missing elements
+  missing_indices <- sample(which(!is.na(X_missing)), 
+                          size = floor(q * n_elements), 
+                          replace = FALSE)
+  X_missing[missing_indices] <- NA
+  return(X_missing)
+}
 
-# Save the plots to a PDF with increased dimensions
-ggsave("css_results_plots_adjusted.pdf", grid, width = 16, height = 12)
+# Step 4: Run experiments
+set.seed(123)  # For reproducibility
+q <- 0.2
+k <- 10
+num_trials <- 5
+css_objective_values <- list(
+  no_missing = numeric(num_trials),
+  css_swapping = numeric(num_trials),
+  bomp = numeric(num_trials)
+)
 
-# Print the grid for direct visualization in R
-print(grid)
+# Initialize progress bar
+progress_bar <- txtProgressBar(min = 0, max = num_trials, style = 3)
+
+# Run trials
+for (trial in 1:num_trials) {
+  # Introduce missingness
+  X_missing <- introduce_missingness(X_centered, q)
+  
+  # Compute covariance matrix for missing data
+  Sigma_hat_missing <- cov(X_missing, use = "pairwise.complete.obs")
+  
+  # Run CSS with no missingness
+  result_no_missing <- css_swapping(Sigma_hat, k)
+  css_objective_values$no_missing[trial] <- result_no_missing$objective
+  
+  # Run CSS with missing data
+  result_css <- css_swapping(Sigma_hat_missing, k)
+  css_objective_values$css_swapping[trial] <- result_css$objective
+  
+  # Run BOMP
+  subset_bomp <- bomp(X_missing, k)
+  css_objective_values$bomp[trial] <- compute_css_objective(Sigma_hat_missing, subset_bomp)
+  
+  # Update progress bar
+  setTxtProgressBar(progress_bar, trial)
+}
+
+# Close progress bar
+close(progress_bar)
+
+# Step 5: Combine results and plot
+results <- data.frame(
+  Method = rep(c("No Missing", "Our Method", "BOMP"), each = num_trials),
+  CSS_Objective = c(css_objective_values$no_missing, 
+                   css_objective_values$css_swapping, 
+                   css_objective_values$bomp)
+)
+
+# Plot the results
+p <- ggplot(results, aes(x = Method, y = CSS_Objective, fill = Method)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(title = paste("CSS Objective Distribution (q =", q, ", k =", k, ")"),
+       y = "CSS Objective",
+       x = "Method") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p)
+
+# Print summary statistics
+cat("\nSummary Statistics:\n")
+print(tapply(results$CSS_Objective, results$Method, summary))
