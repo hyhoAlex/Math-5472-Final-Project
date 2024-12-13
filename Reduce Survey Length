@@ -1,0 +1,117 @@
+# Load necessary libraries
+library(psych)   # For the BFI dataset
+
+# Load the Big Five Inventory dataset from the psych package
+data(bfi)
+
+# Step 1: Preprocess the dataset - retain only numeric columns and handle missing data
+bfi_numeric <- bfi[, sapply(bfi, is.numeric)]  # Keep only numeric columns
+
+# Step 2: Estimate the covariance matrix using the provided function
+estimate_covariance <- function(X_missing) {
+  p <- ncol(X_missing)
+  cov_mat <- matrix(0, nrow = p, ncol = p)
+  
+  for (i in 1:p) {
+    for (j in i:p) {
+      idx <- which(!is.na(X_missing[, i]) & !is.na(X_missing[, j]))
+      if (length(idx) > 1) {
+        xi <- X_missing[idx, i]
+        xj <- X_missing[idx, j]
+        cov_ij <- cov(xi, xj)
+        cov_mat[i, j] <- cov_mat[j, i] <- cov_ij
+      }
+    }
+  }
+  
+  eig <- eigen(cov_mat, symmetric = TRUE)
+  eig$values <- pmax(eig$values, 0)
+  cov_psd <- eig$vectors %*% diag(eig$values) %*% t(eig$vectors)
+  return(cov_psd)
+}
+
+# Step 3: Define the CSS objective function
+compute_css_objective <- function(Sigma, S) {
+  SS <- Sigma[S, S]
+  SS_inv <- solve(SS)
+  obj <- sum(diag(Sigma - Sigma[, S] %*% SS_inv %*% Sigma[S, ]))
+  return(max(obj, 0))
+}
+
+# Step 4: Define the CSS swapping algorithm
+css_swapping <- function(Sigma_hat, k, num_starts = 10) {
+  p <- ncol(Sigma_hat)
+  best_subset <- NULL
+  best_obj <- Inf
+  for (start in 1:num_starts) {
+    S <- sample(1:p, k)
+    current_obj <- compute_css_objective(Sigma_hat, S)
+    improved <- TRUE
+    while (improved) {
+      improved <- FALSE
+      for (i in 1:k) {
+        current_var <- S[i]
+        remaining_vars <- setdiff(1:p, S)
+        for (new_var in remaining_vars) {
+          S_new <- S
+          S_new[i] <- new_var
+          new_obj <- compute_css_objective(Sigma_hat, S_new)
+          if (new_obj < current_obj) {
+            S <- S_new
+            current_obj <- new_obj
+            improved <- TRUE
+            break
+          }
+        }
+        if (improved) break
+      }
+    }
+    if (current_obj < best_obj) {
+      best_subset <- S
+      best_obj <- current_obj
+    }
+  }
+  return(best_subset)
+}
+
+# Step 5: Apply the CSS procedure
+# Estimate the covariance matrix from the BFI dataset (handling missing data)
+Sigma_hat <- estimate_covariance(bfi_numeric)
+
+# Define the target number of questions for the reduced survey
+k <- 22  # Reduce to half the original number of questions
+
+# Perform the CSS swapping algorithm to select the best subset of questions
+selected_items <- css_swapping(Sigma_hat, k)
+
+# Step 6: Map questions to personality factors
+original_factors <- list(
+  Extraversion = c(1, 6, 11, 16, 21, 26, 31, 36),
+  Agreeableness = c(2, 7, 12, 17, 22, 27, 32, 37, 42),
+  Conscientiousness = c(3, 8, 13, 18, 23, 28, 33, 38, 43),
+  Neuroticism = c(4, 9, 14, 19, 24, 29, 34, 39),
+  Openness = c(5, 10, 15, 20, 25, 30, 35, 40, 41, 44)
+)
+
+# Calculate the number of questions per factor in the reduced survey
+reduced_counts <- sapply(original_factors, function(questions) {
+  sum(questions %in% selected_items)
+})
+
+# Calculate the number of questions per factor in the original survey
+original_counts <- sapply(original_factors, length)
+
+# Step 7: Create the table
+table_data <- data.frame(
+  Factor = names(original_factors),
+  `# in Reduced Survey` = reduced_counts,
+  `# in Original Survey` = original_counts
+)
+
+# Print the table
+print(table_data)
+
+# Optional: Create a nicely formatted table using knitr (for markdown or LaTeX output)
+library(knitr)
+kable(table_data, col.names = c("Factor", "# in Reduced Survey", "# in Original Survey"),
+      caption = "The number of questions attributed to each of the five personality factors for both the original and reduced surveys.")
