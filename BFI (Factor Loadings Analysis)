@@ -1,53 +1,51 @@
-# Load necessary libraries
-library(psych)  # For factor analysis
-library(knitr)  # For creating the table
-
-# Step 1: Define the selected items (19 questions as per the paper)
-selected_items <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
-
-# Step 2: Create the reduced dataset
-# Assuming `bfi_numeric` is your original dataset with numeric responses
-reduced_bfi <- bfi_numeric[, selected_items]
-
-# Step 3: Perform exploratory factor analysis (EFA)
-# Set the number of factors to match the paper (e.g., 5 factors)
-num_factors <- 5
-efa_result <- fa(reduced_bfi, nfactors = num_factors, rotate = "varimax")
-
-# Step 4: Extract and clean factor loadings
-# Convert factor loadings to a matrix and exclude summary rows
-factor_loadings <- as.data.frame(as.matrix(efa_result$loadings)[1:19, ])
-
-# Step 5: Add descriptive row labels
-# Replace item numbers with descriptive labels to match the paper
-row_labels <- c(
-  "Extraversion 1", "Extraversion 2", "Extraversion 3", "Extraversion 4",
-  "Agreeableness 1", "Agreeableness 2", "Agreeableness 3", "Agreeableness 4",
-  "Conscientiousness 1", "Conscientiousness 2", "Conscientiousness 3", "Conscientiousness 4", "Conscientiousness 5",
-  "Neuroticism 1", "Neuroticism 2", "Neuroticism 3",
-  "Openness 1", "Openness 2", "Openness 3"
+# Initialize a new category mapping
+new_categories <- list(
+  Extraversion = intersect(original_factors$Extraversion, selected_items),
+  Agreeableness = intersect(original_factors$Agreeableness, selected_items),
+  Conscientiousness = intersect(original_factors$Conscientiousness, selected_items),
+  Neuroticism = intersect(original_factors$Neuroticism, selected_items),
+  Openness = intersect(original_factors$Openness, selected_items)
 )
-rownames(factor_loadings) <- row_labels
 
-# Step 6: Rename columns for clarity
-colnames(factor_loadings) <- paste("Factor", 1:num_factors)
+# Flatten the new categories into a single vector
+mapped_items <- unlist(new_categories)
 
-# Step 7: Bold loadings with magnitudes greater than 0.30
-bold_threshold <- 0.30
-factor_loadings_bold <- apply(factor_loadings, c(1, 2), function(x) {
-  if (abs(x) > bold_threshold) {
-    return(sprintf("**%.2f**", x))  # Bold values above threshold
-  } else {
-    return(sprintf("%.2f", x))
-  }
-})
+# Subset the reduced dataset based on the mapped items
+reduced_data <- bfi_numeric[, mapped_items]
 
-# Step 8: Convert the bolded loadings into a data frame for display
-factor_loadings_bold_df <- as.data.frame(factor_loadings_bold)
+# Create category labels with indices for the items
+item_labels <- unlist(lapply(names(new_categories), function(category) {
+  items <- new_categories[[category]]
+  paste0(category, " ", seq_along(items))  # Label items as "Category 1", "Category 2", etc.
+}))
 
-# Step 9: Create a formatted table
+# Step 4: Perform Exploratory Factor Analysis (EFA)
+# Perform EFA with varimax rotation, assuming 5 factors (one for each personality trait)
+efa_result <- fa(reduced_data, nfactors = 5, rotate = "varimax")
+
+# Step 5: Extract and process factor loadings
+# Get the factor loadings matrix
+factor_loadings <- efa_result$loadings
+
+# Convert to a data frame for easier handling
+loadings_df <- as.data.frame(unclass(factor_loadings))
+
+# Add the category labels as the Item column
+loadings_df$Item <- item_labels
+
+# Bold significant loadings (e.g., > 0.30 or < -0.30) for clarity
+format_bold <- function(x) {
+  ifelse(abs(x) > 0.30, sprintf("**%.2f**", x), sprintf("%.2f", x))
+}
+loadings_bold <- as.data.frame(apply(loadings_df[,-ncol(loadings_df)], 2, format_bold))
+loadings_bold$Item <- loadings_df$Item
+
+# Reorder columns for clarity
+loadings_bold <- loadings_bold[, c("Item", paste0("MR", 1:5))]  # MR1, MR2, ..., MR5
+
+# Step 6: Create a formatted table
 kable(
-  factor_loadings_bold_df,
-  caption = "Factor loadings (after rotation) from an exploratory factor analysis on the reduced survey. Loadings with magnitudes greater than 0.30 are bolded.",
-  align = "c"
+  loadings_bold,
+  col.names = c("Item", "Factor 1", "Factor 2", "Factor 3", "Factor 4", "Factor 5"),
+  caption = "Factor loadings (after rotation) for an exploratory factor analysis on the reduced survey."
 )
