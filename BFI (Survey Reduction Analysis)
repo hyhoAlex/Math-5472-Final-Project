@@ -114,3 +114,4 @@ print(table_data)
 # Optional: Create a nicely formatted table using knitr (for markdown or LaTeX output)
 kable(table_data, col.names = c("Factor", "# in Reduced Survey", "# in Original Survey"),
       caption = "The number of questions attributed to each of the five personality factors for both the original and reduced surveys.")   
+
