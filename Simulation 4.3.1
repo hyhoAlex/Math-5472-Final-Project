@@ -1,0 +1,172 @@
+# Required Libraries
+library(MASS)  # For multivariate normal generation
+library(ggplot2)
+library(Matrix)
+library(progress)  # For progress bar
+
+set.seed(123)
+
+# Parameters
+n <- 200          # Number of samples
+p <- 50           # Number of variables
+k <- 20           # Subset size
+S <- 1:k          # Ground truth subset
+num_trials <- 10 # Number of trials
+signal_values <- c(0.254, 0.812, 2.71, 9.2, 30.0)  # Signal strengths
+unique_factors_cases <- c("Gaussian", "Non-Gaussian")
+
+# Generate Block Diagonal Covariance Matrix W
+generate_W <- function(p, k) {
+  W <- matrix(0, nrow = p, ncol = k)
+  block_size <- k / 5
+  for (b in 0:4) {
+    start_idx <- b * block_size + 1
+    end_idx <- (b + 1) * block_size
+    W[start_idx:end_idx, b + 1] <- 1
+    W[start_idx:end_idx, b + 1 + 5] <- -1
+  }
+  return(W)
+}
+
+# Generate Diagonal Matrix D
+generate_D <- function(p) {
+  mod6 <- 1:p %% 6
+  diag(mod6)
+}
+
+W <- generate_W(p, k)
+D <- generate_D(p)
+
+simulate_data <- function(n, p, k, S, W, D, signal, unique_factors_case) {
+  # Generate X_S
+  if (unique_factors_case == "Gaussian") {
+    # Gaussian case: X_S ~ N(0, signal * D[S, S])
+    X_S <- mvrnorm(n, mu = rep(0, k), Sigma = signal * D[S, S])
+  } else {
+    # Non-Gaussian case
+    X_S <- matrix(0, nrow = n, ncol = k)
+    for (i in 1:k) {
+      if (i %% 3 == 0) {
+        X_S[, i] <- sample(c(-1, 1), n, replace = TRUE)  # Rademacher variables
+      } else if (i %% 3 == 1) {
+        X_S[, i] <- rexp(n, rate = 1) - 1  # Exponential variables
+      } else {
+        X_S[, i] <- rt(n, df = 3)  # t-distributed variables
+      }
+    }
+  }
+  
+  # Generate epsilon (random noise)
+  epsilon <- matrix(rnorm(n * p), nrow = n, ncol = p)  # Noise for all variables
+
+  # Generate X_{-S} using W and X_S
+  X <- W %*% t(X_S)  # Dimensions: (p x n)
+  X <- t(X) + epsilon  # Add noise to all variables (transpose to match dimensions)
+
+  return(X)
+}
+
+css_swapping <- function(Sigma_hat, k, num_starts = 10) {
+  p <- ncol(Sigma_hat)
+  best_subset <- NULL
+  best_obj <- Inf
+  for (start in 1:num_starts) {
+    S <- sample(1:p, k)
+    current_obj <- compute_css_objective(Sigma_hat, S)
+    improved <- TRUE
+    while (improved) {
+      improved <- FALSE
+      for (i in 1:k) {
+        current_var <- S[i]
+        remaining_vars <- setdiff(1:p, S)
+        for (new_var in remaining_vars) {
+          S_new <- S
+          S_new[i] <- new_var
+          new_obj <- compute_css_objective(Sigma_hat, S_new)
+          if (new_obj < current_obj) {
+            S <- S_new
+            current_obj <- new_obj
+            improved <- TRUE
+            break
+          }
+        }
+        if (improved) break
+      }
+    }
+    if (current_obj < best_obj) {
+      best_subset <- S
+      best_obj <- current_obj
+    }
+  }
+  return(best_subset)
+}
+
+compute_css_objective <- function(Sigma, S) {
+  SS <- Sigma[S, S]
+  SS_inv <- solve(SS)
+  obj <- sum(diag(Sigma - Sigma[, S] %*% SS_inv %*% Sigma[S, ]))
+  return(max(obj, 0))
+}
+
+results <- data.frame(
+  Signal = numeric(),
+  Unique_Factors = character(),
+  Selected_Size = numeric(),
+  Correct_Variables = numeric(),
+  Canonical_Correlations = numeric()
+)
+
+# Initialize Progress Bar
+total_iterations <- length(unique_factors_cases) * length(signal_values) * num_trials
+pb <- progress_bar$new(
+  format = "[:bar] :percent ETA: :eta",
+  total = total_iterations,
+  clear = FALSE,
+  width = 60
+)
+
+# Main Simulation Loop
+for (unique_factors_case in unique_factors_cases) {
+  for (signal in signal_values) {
+    for (trial in 1:num_trials) {
+      # Update progress bar
+      pb$tick()
+      
+      # Generate data and compute metrics
+      X <- simulate_data(n, p, k, S, W, D, signal, unique_factors_case)
+      Sigma_hat <- cov(X)
+      
+      S_hat <- css_swapping(Sigma_hat, k)
+      selected_size <- length(S_hat)
+      correct_variables <- length(intersect(S_hat, S))
+      
+      # Compute Canonical Correlations
+      canonical_corr <- sum(cor(X[, S_hat], X[, S])^2)
+      
+      # Store Results
+      results <- rbind(results, data.frame(
+        Signal = signal,
+        Unique_Factors = unique_factors_case,
+        Selected_Size = selected_size,
+        Correct_Variables = correct_variables,
+        Canonical_Correlations = canonical_corr
+      ))
+    }
+  }
+}
+
+# Visualization
+ggplot(results, aes(x = factor(Signal), y = Selected_Size, fill = Unique_Factors)) +
+  geom_boxplot() +
+  labs(title = "Size of Selected Subset", x = "Signal Strength", y = "Selected Subset Size") +
+  theme_minimal()
+
+ggplot(results, aes(x = factor(Signal), y = Correct_Variables, fill = Unique_Factors)) +
+  geom_boxplot() +
+  labs(title = "Number of Correct Variables", x = "Signal Strength", y = "Correct Variables") +
+  theme_minimal()
+
+ggplot(results, aes(x = factor(Signal), y = Canonical_Correlations, fill = Unique_Factors)) +
+  geom_boxplot() +
+  labs(title = "Sum of Square Canonical Correlations", x = "Signal Strength", y = "Canonical Correlations") +
+  theme_minimal()
