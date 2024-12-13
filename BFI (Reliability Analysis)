@@ -1,0 +1,143 @@
+# Load necessary libraries
+library(boot)
+library(ggplot2)
+
+# Step 1: Load and preprocess the dataset
+file_path <- "C:\\Users\\doubl\\Downloads\\eighthr.data"
+data <- read.table(file_path, header = FALSE, sep = ",", na.strings = "?")
+X <- as.matrix(data[, -1])  # Remove the first column (date)
+
+# Remove rows with all missing values
+X <- X[rowSums(!is.na(X)) > 0, ]
+
+# Impute missing values with column means to ensure no missing values remain
+X <- apply(X, 2, function(col) {
+  ifelse(is.na(col), mean(col, na.rm = TRUE), col)
+})
+
+# Normalize the data (z-score normalization)
+X <- scale(X, center = TRUE, scale = TRUE)
+
+# Step 2: Estimate the covariance matrix
+estimate_covariance <- function(X_missing) {
+  p <- ncol(X_missing)
+  cov_mat <- matrix(0, nrow = p, ncol = p)
+  
+  for (i in 1:p) {
+    for (j in i:p) {
+      idx <- which(!is.na(X_missing[, i]) & !is.na(X_missing[, j]))
+      if (length(idx) > 1) {
+        xi <- X_missing[idx, i]
+        xj <- X_missing[idx, j]
+        cov_ij <- cov(xi, xj)
+        cov_mat[i, j] <- cov_mat[j, i] <- cov_ij
+      }
+    }
+  }
+  
+  # Ensure positive semi-definiteness
+  eig <- eigen(cov_mat, symmetric = TRUE)
+  eig$values <- pmax(eig$values, 0)
+  cov_psd <- eig$vectors %*% diag(eig$values) %*% t(eig$vectors)
+  return(cov_psd)
+}
+
+Sigma_hat <- estimate_covariance(X)
+
+# Step 3: Perform CSS (Subset Selection)
+css_swapping <- function(Sigma_hat, k, num_starts = 50) {
+  p <- ncol(Sigma_hat)
+  best_subset <- NULL
+  best_obj <- Inf
+  
+  compute_css_objective <- function(Sigma, S) {
+    SS <- Sigma[S, S]
+    SS_inv <- solve(SS)
+    obj <- sum(diag(Sigma - Sigma[, S] %*% SS_inv %*% Sigma[S, ]))
+    return(max(obj, 0))
+  }
+  
+  for (start in 1:num_starts) {
+    S <- sample(1:p, k)
+    current_obj <- compute_css_objective(Sigma_hat, S)
+    improved <- TRUE
+    while (improved) {
+      improved <- FALSE
+      for (i in 1:k) {
+        current_var <- S[i]
+        remaining_vars <- setdiff(1:p, S)
+        for (new_var in remaining_vars) {
+          S_new <- S
+          S_new[i] <- new_var
+          new_obj <- compute_css_objective(Sigma_hat, S_new)
+          if (new_obj < current_obj) {
+            S <- S_new
+            current_obj <- new_obj
+            improved <- TRUE
+            break
+          }
+        }
+        if (improved) break
+      }
+    }
+    if (current_obj < best_obj) {
+      best_subset <- S
+      best_obj <- current_obj
+    }
+  }
+  return(best_subset)
+}
+
+num_questions <- c(4, 4, 5, 3, 3)
+selected_subsets <- list()
+for (k in num_questions) {
+  subset <- css_swapping(Sigma_hat, k)
+  selected_subsets[[length(selected_subsets) + 1]] <- subset
+}
+
+# Step 4: Define Cronbach's alpha
+compute_cronbach_alpha <- function(data_subset) {
+  data_subset <- data_subset[rowSums(!is.na(data_subset)) > 0, ]
+  p <- ncol(data_subset)
+  if (p < 2 || nrow(data_subset) == 0) return(NA)
+  item_var <- apply(data_subset, 2, var, na.rm = TRUE)
+  total_var <- var(rowSums(data_subset, na.rm = TRUE), na.rm = TRUE)
+  alpha <- p / (p - 1) * (1 - sum(item_var, na.rm = TRUE) / total_var)
+  if (is.nan(alpha) || alpha < 0) alpha <- 0
+  if (alpha > 1) alpha <- 1
+  return(alpha)
+}
+
+# Step 5: Bootstrap
+bootstrap_alpha <- function(data, indices, subset_indices) {
+  data_resampled <- data[indices, , drop = FALSE]
+  data_subset <- data_resampled[, subset_indices, drop = FALSE]
+  return(compute_cronbach_alpha(data_subset))
+}
+
+bootstrap_results <- list()
+for (i in 1:length(selected_subsets)) {
+  subset_indices <- selected_subsets[[i]]
+  boot_result <- boot(data = X, statistic = bootstrap_alpha, R = 1000, subset_indices = subset_indices)
+  bootstrap_results[[i]] <- boot.ci(boot_result, type = "bca")  # Use bias-corrected intervals
+}
+
+# Generate a results data frame with actual bootstrap results
+results <- data.frame(
+  Trait = rep(c("Extraversion", "Agreeableness", "Conscientiousness", "Neuroticism", "Openness"), each = 1),
+  Survey = rep("Ours", times = 5),  # Assuming the results are for your survey
+  Alpha = sapply(bootstrap_results, function(res) res$t0),  # Extract the observed alpha
+  Lower = sapply(bootstrap_results, function(res) res$bca[4]),  # Extract lower bound of CI
+  Upper = sapply(bootstrap_results, function(res) res$bca[5])   # Extract upper bound of CI
+)
+
+# If you have multiple surveys (e.g., Norwegian, Brazilian, etc.), modify accordingly:
+# Combine results for all surveys and traits into the data frame
+# Add corresponding Survey labels for each Alpha, Lower, and Upper.
+
+ggplot(results, aes(x = Trait, y = Alpha, color = Survey)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.2, position = position_dodge(width = 0.5)) +
+  labs(title = "Reliability of Shortened BFI Surveys",
+       y = "Coefficient α", x = "") +
+  theme_minimal()
