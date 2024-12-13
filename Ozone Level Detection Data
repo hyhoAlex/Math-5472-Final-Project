@@ -1,51 +1,76 @@
-# Load required libraries
+# Load necessary packages
+library(mvtnorm)  # For multivariate normal data generation
+library(Matrix)   # For matrix computations
+library(glmnet)   # For group lasso implementation
+library(dplyr)    # For data aggregation and summarization
 library(ggplot2)
 library(MASS)
+
+set.seed(123)  # For reproducibility
 
 # Load and preprocess the data
 file_path <- "C:/Users/doubl/Downloads/eighthr.data"
 data <- read.csv(file_path, header = FALSE)
 
 # Step 1: Preprocess the data
-# Exclude the first column (assumed to be dates or non-numeric data)
-X <- data[, -1, drop = FALSE]  # Remove the first column and ensure matrix structure
-X <- apply(X, 2, as.numeric)   # Convert all columns to numeric
-X <- as.matrix(X)              # Ensure X is treated as a matrix
-
-# Verify that X is numeric
-if (!is.numeric(X)) {
-  stop("X contains non-numeric data. Please check the dataset.")
-}
+X <- data[, -1, drop = FALSE]  # Remove the first column
+X <- apply(X, 2, as.numeric)   # Convert to numeric
+X <- as.matrix(X)              # Convert to matrix
 
 # Remove columns with all zeros or missing values
 non_zero_cols <- which(colSums(!is.na(X) & X != 0) > 0)
 X <- X[, non_zero_cols, drop = FALSE]
 
-# Remove rows with any missing values for initial covariance computation
+# Remove rows with any missing values
 complete_rows <- complete.cases(X)
 X_complete <- X[complete_rows, , drop = FALSE]
 
-# Center the complete data
-X_centered <- scale(X_complete, center = TRUE, scale = FALSE)
-Sigma_hat <- (t(X_centered) %*% X_centered) / nrow(X_centered)
+# Center and scale the data
+X_complete <- scale(X_complete, center = TRUE, scale = TRUE)
+Sigma_hat <- cov(X_complete)
 
-# Step 2: Define the functions for CSS and BOMP
-# CSS Objective Function
-compute_css_objective <- function(Sigma, S) {
-  p <- nrow(Sigma)
-  if (length(S) == 0) return(sum(diag(Sigma)))
+
+# Simulation parameters
+k <- 10                # Subset size
+num_trials <- 5     # Number of simulation trials
+missing_prob <- 0.2  # Probability of missingness (i.e. q)
+
+# Storage for performance metrics
+results <- data.frame(
+  Method = character(),
+  CSS_Objective = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Estimate covariance matrix with missing data
+estimate_covariance <- function(X_missing) {
+  p <- ncol(X_missing)
+  cov_mat <- matrix(0, nrow = p, ncol = p)
   
-  SS <- Sigma[S, S, drop = FALSE]
-  # Use generalized inverse for numerical stability
-  tryCatch({
-    SS_inv <- MASS::ginv(SS)
-    # Compute reconstruction error
-    reconstruction <- Sigma[, S, drop = FALSE] %*% SS_inv %*% t(Sigma[, S, drop = FALSE])
-    obj <- sum(diag(Sigma)) - sum(diag(reconstruction))
-    return(max(0, obj))  # Ensure non-negative objective
-  }, error = function(e) {
-    return(sum(diag(Sigma)))  # Return total variance if computation fails
-  })
+  for (i in 1:p) {
+    for (j in i:p) {
+      idx <- which(!is.na(X_missing[, i]) & !is.na(X_missing[, j]))
+      if (length(idx) > 1) {
+        xi <- X_missing[idx, i]
+        xj <- X_missing[idx, j]
+        cov_ij <- cov(xi, xj)
+        cov_mat[i, j] <- cov_mat[j, i] <- cov_ij
+      }
+    }
+  }
+  
+  eig <- eigen(cov_mat, symmetric = TRUE)
+  eig$values <- pmax(eig$values, 0)
+  cov_psd <- eig$vectors %*% diag(eig$values) %*% t(eig$vectors)
+  return(cov_psd)
+}
+
+# CSS Objective function
+compute_css_objective <- function(Sigma, S) {
+  SS <- Sigma[S, S]
+  SS_inv <- solve(SS)
+  obj <- sum(diag(Sigma - Sigma[, S] %*% SS_inv %*% Sigma[S, ]))
+  return(max(obj, 0))
 }
 
 # Swapping algorithm for CSS
@@ -53,24 +78,18 @@ css_swapping <- function(Sigma_hat, k, num_starts = 10) {
   p <- ncol(Sigma_hat)
   best_subset <- NULL
   best_obj <- Inf
-  
   for (start in 1:num_starts) {
-    # Initialize with random subset
-    S <- sort(sample(1:p, k))
+    S <- sample(1:p, k)
     current_obj <- compute_css_objective(Sigma_hat, S)
-    
     improved <- TRUE
     while (improved) {
       improved <- FALSE
       for (i in 1:k) {
         current_var <- S[i]
         remaining_vars <- setdiff(1:p, S)
-        
         for (new_var in remaining_vars) {
           S_new <- S
           S_new[i] <- new_var
-          S_new <- sort(S_new)  # Keep sorted for consistency
-          
           new_obj <- compute_css_objective(Sigma_hat, S_new)
           if (new_obj < current_obj) {
             S <- S_new
@@ -82,20 +101,17 @@ css_swapping <- function(Sigma_hat, k, num_starts = 10) {
         if (improved) break
       }
     }
-    
     if (current_obj < best_obj) {
       best_subset <- S
       best_obj <- current_obj
     }
   }
-  
-  return(list(subset = best_subset, objective = best_obj))
+  return(best_subset)
 }
 
 # Block Orthogonal Matching Pursuit (BOMP)
 bomp <- function(X_missing, k) {
   p <- ncol(X_missing)
-  n <- nrow(X_missing)
   selected_vars <- integer(0)
   residual <- X_missing
   
@@ -104,8 +120,8 @@ bomp <- function(X_missing, k) {
     for (j in setdiff(1:p, selected_vars)) {
       idx <- which(!is.na(residual[, j]))
       if (length(idx) > 1) {
-        temp <- residual[idx, j]
-        correlations[j] <- sum(temp^2, na.rm = TRUE)
+        temp <- residual[idx, j]  # Use available values only (ignore missing data)
+        correlations[j] <- sum(temp^2, na.rm = TRUE)  # No weighting
       } else {
         correlations[j] <- 0
       }
@@ -113,20 +129,15 @@ bomp <- function(X_missing, k) {
     new_var <- which.max(correlations)
     selected_vars <- c(selected_vars, new_var)
     
-    # Update residual
     X_selected <- X_missing[, selected_vars, drop = FALSE]
-    for (j in 1:p) {
+    for (j in 1:ncol(X_missing)) {
       idx <- which(!is.na(X_selected[, 1]) & !is.na(X_missing[, j]))
-      if (length(idx) > ncol(X_selected)) {  # Need more samples than variables for regression
+      if (length(idx) > 1) {
         Y <- X_missing[idx, j]
         X <- X_selected[idx, , drop = FALSE]
-        tryCatch({
-          model <- lm(Y ~ X - 1)
-          pred <- X %*% coef(model)
-          residual[idx, j] <- Y - pred
-        }, error = function(e) {
-          # If regression fails, keep original residuals
-        })
+        model <- lm(Y ~ X - 1)
+        pred <- X %*% coef(model)
+        residual[idx, j] <- X_missing[idx, j] - pred
       }
     }
   }
@@ -134,78 +145,67 @@ bomp <- function(X_missing, k) {
   return(selected_vars)
 }
 
-# Step 3: Simulate missingness
+# Modified missingness introduction
 introduce_missingness <- function(X, q) {
   X_missing <- X
-  n_elements <- length(X_missing[!is.na(X_missing)])  # Count non-missing elements
-  missing_indices <- sample(which(!is.na(X_missing)), 
-                          size = floor(q * n_elements), 
-                          replace = FALSE)
+  n_elements <- length(X_missing)
+  n_missing <- floor(q * n_elements)
+  
+  # Ensure we don't create rows with all missing values
+  repeat {
+    X_test <- X_missing
+    missing_indices <- sample(1:n_elements, size = n_missing)
+    X_test[missing_indices] <- NA
+    if (all(rowSums(!is.na(X_test)) > 0)) break
+  }
+  
   X_missing[missing_indices] <- NA
   return(X_missing)
 }
 
-# Step 4: Run experiments
-set.seed(123)  # For reproducibility
-q <- 0.2
-k <- 10
-num_trials <- 5
-css_objective_values <- list(
-  no_missing = numeric(num_trials),
-  css_swapping = numeric(num_trials),
-  bomp = numeric(num_trials)
-)
-
-# Initialize progress bar
-progress_bar <- txtProgressBar(min = 0, max = num_trials, style = 3)
-
-# Run trials
+# Main simulation loop
 for (trial in 1:num_trials) {
-  # Introduce missingness
-  X_missing <- introduce_missingness(X_centered, q)
-  
-  # Compute covariance matrix for missing data
-  Sigma_hat_missing <- cov(X_missing, use = "pairwise.complete.obs")
-  
-  # Run CSS with no missingness
-  result_no_missing <- css_swapping(Sigma_hat, k)
-  css_objective_values$no_missing[trial] <- result_no_missing$objective
-  
-  # Run CSS with missing data
-  result_css <- css_swapping(Sigma_hat_missing, k)
-  css_objective_values$css_swapping[trial] <- result_css$objective
-  
-  # Run BOMP
-  subset_bomp <- bomp(X_missing, k)
-  css_objective_values$bomp[trial] <- compute_css_objective(Sigma_hat_missing, subset_bomp)
-  
-  # Update progress bar
-  setTxtProgressBar(progress_bar, trial)
+  tryCatch({
+    
+    X_missing <- introduce_missingness(X_complete, missing_prob)
+    Sigma_hat <- estimate_covariance(X_missing)
+    
+    # Covariance CSS (Swapping)
+    selected_subset <- css_swapping(Sigma_hat, k)
+    css_obj <- compute_css_objective(cov(X_complete), selected_subset)
+    results <- rbind(results, data.frame(
+      Method = "Covariance CSS",
+      CSS_Objective = css_obj
+    ))
+    
+    # Block OMP
+    selected_bomp <- bomp(X_missing, k)
+    css_obj_bomp <- compute_css_objective(cov(X_complete), selected_bomp)
+    results <- rbind(results, data.frame(
+      Method = "BOMP",
+      CSS_Objective = css_obj_bomp
+    ))
+    
+  }, error = function(e) {
+    warning(paste("Trial", trial, "failed:", e$message))
+  })
 }
 
-# Close progress bar
-close(progress_bar)
+# Aggregate results
+aggregated_results <- results %>%
+  group_by(Method) %>%
+  summarise(
+    CSS_Objective_Mean = mean(CSS_Objective, na.rm = TRUE),
+    CSS_Objective_SD = sd(CSS_Objective, na.rm = TRUE),
+    .groups = 'drop'
+  )
 
-# Step 5: Combine results and plot
-results <- data.frame(
-  Method = rep(c("No Missing", "Our Method", "BOMP"), each = num_trials),
-  CSS_Objective = c(css_objective_values$no_missing, 
-                   css_objective_values$css_swapping, 
-                   css_objective_values$bomp)
-)
+# Format results
+formatted_results <- aggregated_results %>%
+  mutate(
+    CSS_Objective = sprintf("%.3f ± %.3f", CSS_Objective_Mean, CSS_Objective_SD)
+  ) %>%
+  dplyr::select(Method, CSS_Objective)
 
-# Plot the results
-p <- ggplot(results, aes(x = Method, y = CSS_Objective, fill = Method)) +
-  geom_boxplot() +
-  geom_jitter(width = 0.2, alpha = 0.5) +
-  labs(title = paste("CSS Objective Distribution (q =", q, ", k =", k, ")"),
-       y = "CSS Objective",
-       x = "Method") +
-  theme_minimal() +
-  theme(legend.position = "none")
-
-print(p)
-
-# Print summary statistics
-cat("\nSummary Statistics:\n")
-print(tapply(results$CSS_Objective, results$Method, summary))
+# Display results
+print(formatted_results)
