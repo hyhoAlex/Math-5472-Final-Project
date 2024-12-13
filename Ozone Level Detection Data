@@ -1,224 +1,9 @@
 # Load necessary packages
-library(mvtnorm)  # For multivariate normal data generation
-library(Matrix)   # For matrix computations
-library(glmnet)   # For group lasso implementation
-library(dplyr)    # For data aggregation and summarization
-library(ggplot2)
-library(MASS)
-
-set.seed(123)  # For reproducibility
-
-# Load and preprocess the data
-file_path <- "C:/Users/doubl/Downloads/eighthr.data"
-data <- read.csv(file_path, header = FALSE)
-
-# Step 1: Preprocess the data
-X <- data[, -1, drop = FALSE]  # Remove the first column
-X <- apply(X, 2, as.numeric)   # Convert to numeric
-X <- as.matrix(X)              # Convert to matrix
-
-# Remove columns with all zeros or missing values
-non_zero_cols <- which(colSums(!is.na(X) & X != 0) > 0)
-X <- X[, non_zero_cols, drop = FALSE]
-
-# Remove rows with any missing values
-complete_rows <- complete.cases(X)
-X_complete <- X[complete_rows, , drop = FALSE]
-
-# Center and scale the data
-X_complete <- scale(X_complete, center = TRUE, scale = TRUE)
-Sigma_hat <- cov(X_complete)
-
-
-# Simulation parameters
-k <- 10                # Subset size
-num_trials <- 5     # Number of simulation trials
-missing_prob <- 0.2  # Probability of missingness (i.e. q)
-
-# Storage for performance metrics
-results <- data.frame(
-  Method = character(),
-  CSS_Objective = numeric(),
-  stringsAsFactors = FALSE
-)
-
-# Estimate covariance matrix with missing data
-estimate_covariance <- function(X_missing) {
-  p <- ncol(X_missing)
-  cov_mat <- matrix(0, nrow = p, ncol = p)
-  
-  for (i in 1:p) {
-    for (j in i:p) {
-      idx <- which(!is.na(X_missing[, i]) & !is.na(X_missing[, j]))
-      if (length(idx) > 1) {
-        xi <- X_missing[idx, i]
-        xj <- X_missing[idx, j]
-        cov_ij <- cov(xi, xj)
-        cov_mat[i, j] <- cov_mat[j, i] <- cov_ij
-      }
-    }
-  }
-  
-  eig <- eigen(cov_mat, symmetric = TRUE)
-  eig$values <- pmax(eig$values, 0)
-  cov_psd <- eig$vectors %*% diag(eig$values) %*% t(eig$vectors)
-  return(cov_psd)
-}
-
-# CSS Objective function
-compute_css_objective <- function(Sigma, S) {
-  SS <- Sigma[S, S]
-  SS_inv <- solve(SS)
-  obj <- sum(diag(Sigma - Sigma[, S] %*% SS_inv %*% Sigma[S, ]))
-  return(max(obj, 0))
-}
-
-# Swapping algorithm for CSS
-css_swapping <- function(Sigma_hat, k, num_starts = 10) {
-  p <- ncol(Sigma_hat)
-  best_subset <- NULL
-  best_obj <- Inf
-  for (start in 1:num_starts) {
-    S <- sample(1:p, k)
-    current_obj <- compute_css_objective(Sigma_hat, S)
-    improved <- TRUE
-    while (improved) {
-      improved <- FALSE
-      for (i in 1:k) {
-        current_var <- S[i]
-        remaining_vars <- setdiff(1:p, S)
-        for (new_var in remaining_vars) {
-          S_new <- S
-          S_new[i] <- new_var
-          new_obj <- compute_css_objective(Sigma_hat, S_new)
-          if (new_obj < current_obj) {
-            S <- S_new
-            current_obj <- new_obj
-            improved <- TRUE
-            break
-          }
-        }
-        if (improved) break
-      }
-    }
-    if (current_obj < best_obj) {
-      best_subset <- S
-      best_obj <- current_obj
-    }
-  }
-  return(best_subset)
-}
-
-# Block Orthogonal Matching Pursuit (BOMP)
-bomp <- function(X_missing, k) {
-  p <- ncol(X_missing)
-  selected_vars <- integer(0)
-  residual <- X_missing
-  
-  for (i in 1:k) {
-    correlations <- numeric(p)
-    for (j in setdiff(1:p, selected_vars)) {
-      idx <- which(!is.na(residual[, j]))
-      if (length(idx) > 1) {
-        temp <- residual[idx, j]  # Use available values only (ignore missing data)
-        correlations[j] <- sum(temp^2, na.rm = TRUE)  # No weighting
-      } else {
-        correlations[j] <- 0
-      }
-    }
-    new_var <- which.max(correlations)
-    selected_vars <- c(selected_vars, new_var)
-    
-    X_selected <- X_missing[, selected_vars, drop = FALSE]
-    for (j in 1:ncol(X_missing)) {
-      idx <- which(!is.na(X_selected[, 1]) & !is.na(X_missing[, j]))
-      if (length(idx) > 1) {
-        Y <- X_missing[idx, j]
-        X <- X_selected[idx, , drop = FALSE]
-        model <- lm(Y ~ X - 1)
-        pred <- X %*% coef(model)
-        residual[idx, j] <- X_missing[idx, j] - pred
-      }
-    }
-  }
-  
-  return(selected_vars)
-}
-
-# Modified missingness introduction
-introduce_missingness <- function(X, q) {
-  X_missing <- X
-  n_elements <- length(X_missing)
-  n_missing <- floor(q * n_elements)
-  
-  # Ensure we don't create rows with all missing values
-  repeat {
-    X_test <- X_missing
-    missing_indices <- sample(1:n_elements, size = n_missing)
-    X_test[missing_indices] <- NA
-    if (all(rowSums(!is.na(X_test)) > 0)) break
-  }
-  
-  X_missing[missing_indices] <- NA
-  return(X_missing)
-}
-
-# Main simulation loop
-for (trial in 1:num_trials) {
-  tryCatch({
-    
-    X_missing <- introduce_missingness(X_complete, missing_prob)
-    Sigma_hat <- estimate_covariance(X_missing)
-    
-    # Covariance CSS (Swapping)
-    selected_subset <- css_swapping(Sigma_hat, k)
-    css_obj <- compute_css_objective(cov(X_complete), selected_subset)
-    results <- rbind(results, data.frame(
-      Method = "Covariance CSS",
-      CSS_Objective = css_obj
-    ))
-    
-    # Block OMP
-    selected_bomp <- bomp(X_missing, k)
-    css_obj_bomp <- compute_css_objective(cov(X_complete), selected_bomp)
-    results <- rbind(results, data.frame(
-      Method = "BOMP",
-      CSS_Objective = css_obj_bomp
-    ))
-    
-  }, error = function(e) {
-    warning(paste("Trial", trial, "failed:", e$message))
-  })
-}
-
-# Aggregate results
-aggregated_results <- results %>%
-  group_by(Method) %>%
-  summarise(
-    CSS_Objective_Mean = mean(CSS_Objective, na.rm = TRUE),
-    CSS_Objective_SD = sd(CSS_Objective, na.rm = TRUE),
-    .groups = 'drop'
-  )
-
-# Format results
-formatted_results <- aggregated_results %>%
-  mutate(
-    CSS_Objective = sprintf("%.3f ± %.3f", CSS_Objective_Mean, CSS_Objective_SD)
-  ) %>%
-  dplyr::select(Method, CSS_Objective)
-
-# Display results
-print(formatted_results)
-
-```
-
-
-```{r}
-# Load necessary packages
 library(mvtnorm)
 library(Matrix)
 library(dplyr)
 library(ggplot2)
+library(progress)  # For the progress bar
 
 set.seed(123)  # For reproducibility
 
@@ -247,8 +32,8 @@ Sigma_hat_complete <- cov(X_complete)
 
 # Parameters for the simulation
 k <- 10               # Subset size
-num_trials <- 10     # Number of trials
-missing_prob <- 0.1   # Probability of missingness (q)
+num_trials <- 20      # Number of trials
+missing_prob <- 0.2   # Probability of missingness (q)
 
 # Estimate covariance matrix with missing data
 estimate_covariance <- function(X_missing) {
@@ -370,14 +155,21 @@ introduce_missingness <- function(X, q) {
   return(X_missing)
 }
 
-# Main simulation loop
+# Main simulation loop with progress bar
 results <- data.frame(
   Method = character(),
   CSS_Objective = numeric(),
   stringsAsFactors = FALSE
 )
 
+pb <- progress_bar$new(
+  format = "  Running simulations [:bar] :percent in :elapsed",
+  total = num_trials, clear = FALSE, width = 60
+)
+
 for (trial in 1:num_trials) {
+  pb$tick()  # Update progress bar
+  
   X_missing <- introduce_missingness(X_complete, missing_prob)
   Sigma_hat <- estimate_covariance(X_missing)
   
@@ -405,7 +197,7 @@ ground_truth_css <- compute_css_objective(Sigma_hat_complete, selected_ground_tr
 # Plot results
 ggplot(results, aes(x = CSS_Objective, fill = Method)) +
   geom_histogram(position = "dodge", bins = 30, alpha = 0.7) +
-  geom_vline(xintercept = ground_truth_css, color = "red", linetype = "dashed", size = 1) +
+  geom_vline(xintercept = ground_truth_css, color = "red", linetype = "dashed", linewidth = 1) +
   labs(
     title = "CSS Objective Distribution (q = 0.1, k = 10)",
     x = "CSS Objective",
