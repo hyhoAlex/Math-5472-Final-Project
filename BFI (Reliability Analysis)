@@ -3,21 +3,20 @@ library(psych)   # For Cronbach's alpha
 library(ggplot2) # For plotting
 library(boot)    # For bootstrap confidence intervals
 
-# Step 1: Ensure data is numeric
+# Ensure data is numeric
 bfi_numeric <- as.data.frame(lapply(bfi_numeric, function(x) as.numeric(as.character(x))))
 
-# Step 2: Identify items with "R" in their names
-items_to_reverse <- grep("R$", colnames(bfi_numeric), value = TRUE)  # Select items ending with "R"
+# Identify items with "R" in their names
+items_to_reverse <- grep("R$", colnames(bfi_numeric), value = TRUE)
 
-# Step 3: Reverse-code these items in the dataset
+# Reverse-code these items in the dataset
 max_scale <- 5  # Adjust based on the Likert scale
-bfi_numeric_reversed <- bfi_numeric  # Copy the dataset
+bfi_numeric_reversed <- bfi_numeric
 for (item in items_to_reverse) {
-  # Reverse-code the item
   bfi_numeric_reversed[[item]] <- max_scale + 1 - bfi_numeric[[item]]
 }
 
-# Step 2: Define personality factors (adjust to match your dataset)
+# Define personality factors
 new_categories <- list(
   Extraversion = c("talkative", "fullenergy", "enthusiastic", "quietR", "shyR", "outgoing"),
   Agreeableness = c("findfaultR", "helpful", "quarrelsR", "forgiving", "trusting", "coldR"),
@@ -26,48 +25,66 @@ new_categories <- list(
   Openness = c("curious", "imagination", "artistic", "routineR", "nonartisticR", "sophisticated")
 )
 
-# Step 3: Define a function to calculate Cronbach's alpha
+# Extract dataset subsets based on indices
+NORWEGIAN_IDXS <- c(0, 4, 6, 7, 9, 13, 14, 15, 17, 19, 20, 24, 26, 27, 29, 33, 34, 37, 41, 43) + 1
+BRAZILIAN_IDXS <- c(0, 1, 4, 7, 9, 11, 14, 16, 17, 18, 20, 21, 28, 30, 31, 33, 34, 36, 38, 41) + 1
+SERBIAN_IDXS <- c(0, 2, 4, 7, 10, 11, 14, 15, 18, 20, 21, 22, 27, 29, 30, 32, 34, 35, 38, 41) + 1
+
+norwegian_data <- bfi_numeric_reversed[, NORWEGIAN_IDXS]
+brazilian_data <- bfi_numeric_reversed[, BRAZILIAN_IDXS]
+serbian_data <- bfi_numeric_reversed[, SERBIAN_IDXS]
+
+# Function to calculate Cronbach's alpha manually
+cronbach_alpha <- function(data) {
+  k <- ncol(data)  # Number of items
+  variances <- apply(data, 2, var, na.rm = TRUE)  # Variance of each item
+  total_variance <- var(rowSums(data, na.rm = TRUE), na.rm = TRUE)  # Total variance
+  alpha <- (k / (k - 1)) * (1 - sum(variances) / total_variance)  # Cronbach's alpha formula
+  return(alpha)
+}
+
+# Function for bootstrap-based alpha calculation
 calc_alpha <- function(data, indices) {
   sampled_data <- data[indices, ]
-  return(alpha(sampled_data)$total$raw_alpha)
+  return(cronbach_alpha(sampled_data))
 }
 
-# Step 4: Perform bootstrap to calculate alpha and 95% confidence intervals
+# Perform bootstrap to calculate alpha and 95% confidence intervals
 bootstrap_alpha <- function(data, B = 1000) {
-  results <- boot(data, statistic = calc_alpha, R = B)  # Perform bootstrap
-  alpha_est <- mean(results$t)  # Mean alpha value
-  alpha_ci <- boot.ci(results, type = "perc")$percent[4:5]  # 95% CI
-  return(c(alpha_est, alpha_ci))  # Return alpha and confidence intervals
+  results <- boot(data, statistic = calc_alpha, R = B)
+  alpha_est <- mean(results$t, na.rm = TRUE)
+  alpha_ci <- tryCatch({
+    boot.ci(results, type = "perc")$percent[4:5]
+  }, error = function(e) {
+    c(NA, NA)  # Return NA if confidence interval calculation fails
+  })
+  return(c(alpha_est, alpha_ci))
 }
 
-# Step 5: Calculate Cronbach's alpha and confidence intervals for each personality factor
+# Calculate Cronbach's alpha for each personality factor
 factor_results <- data.frame(Factor = character(), Alpha = numeric(), LowerCI = numeric(), UpperCI = numeric())
-
 for (factor in names(new_categories)) {
-  # Subset data for the current factor
   factor_data <- bfi_numeric_reversed[, new_categories[[factor]], drop = FALSE]
-  
-  # Run bootstrap to calculate alpha and confidence intervals
   result <- bootstrap_alpha(factor_data)
-  
-  # Add the results to our dataframe
   factor_results <- rbind(factor_results, 
                           data.frame(Factor = factor, Alpha = result[1], LowerCI = result[2], UpperCI = result[3]))
 }
 
-# Step 6: Add comparison datasets (Norwegian, Brazilian, and Serbian surveys)
+# Use manual Cronbach's alpha for Norwegian, Brazilian, and Serbian datasets
+norwegian_alpha <- cronbach_alpha(norwegian_data)
+brazilian_alpha <- cronbach_alpha(brazilian_data)
+serbian_alpha <- cronbach_alpha(serbian_data)
+
 comparison_data <- data.frame(
   Factor = rep(c("Extraversion", "Agreeableness", "Conscientiousness", "Neuroticism", "Openness"), 3),
   Survey = rep(c("Norwegian", "Brazilian", "Serbian"), each = 5),
-  Alpha = c(0.79, 0.72, 0.81, 0.77, 0.75,  # Norwegian
-            0.76, 0.70, 0.78, 0.72, 0.73,  # Brazilian
-            0.78, 0.74, 0.80, 0.73, 0.74), # Serbian
-  LowerCI = c(0.75, 0.69, 0.78, 0.73, 0.71, # Norwegian
-              0.72, 0.67, 0.75, 0.69, 0.70, # Brazilian
-              0.74, 0.71, 0.77, 0.70, 0.71), # Serbian
-  UpperCI = c(0.83, 0.76, 0.85, 0.81, 0.79, # Norwegian
-              0.80, 0.73, 0.81, 0.75, 0.76, # Brazilian
-              0.82, 0.77, 0.83, 0.76, 0.77)  # Serbian
+  Alpha = c(
+    norwegian_alpha, 
+    brazilian_alpha, 
+    serbian_alpha
+  ),
+  LowerCI = NA,
+  UpperCI = NA
 )
 
 # Add your survey results to the comparison data
@@ -79,9 +96,13 @@ our_results <- data.frame(
   UpperCI = factor_results$UpperCI
 )
 
+# Combine all results
 final_data <- rbind(comparison_data, our_results)
 
-# Step 7: Create the plot
+# Ensure the Survey column is a factor
+final_data$Survey <- as.factor(final_data$Survey)
+
+# Create the plot
 ggplot(final_data, aes(x = Factor, y = Alpha, color = Survey)) +
   geom_point(position = position_dodge(width = 0.4), size = 3) +
   geom_errorbar(aes(ymin = LowerCI, ymax = UpperCI), position = position_dodge(width = 0.4), width = 0.2) +
